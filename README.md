@@ -80,15 +80,111 @@ samba-common-tools
 ```
 2. Install Build Dependencies
    - `sponge` command from `moreutils`
-   - `yarn` package manager
+   - Node.js 20+ (use Corepack for Yarn)
    - `make`
 3. Clone git repo, build, and install
 ```bash
 git clone https://github.com/45Drives/cockpit-file-sharing.git
 cd cockpit-file-sharing
+git submodule update --init --recursive
+corepack enable
+corepack prepare yarn@4.9.3 --activate
+yarn config set nodeLinker node-modules
+yarn install --mode=skip-build
 make
 sudo make install
 ```
+
+# Build/Test/Package (Maintainers)
+## Local build
+```bash
+git submodule update --init --recursive
+corepack enable
+corepack prepare yarn@4.9.3 --activate
+yarn config set nodeLinker node-modules
+yarn install --mode=skip-build
+make
+```
+
+## Tests
+```bash
+cd file-sharing
+yarn test
+```
+
+## Debian/Ubuntu packaging (Questing example)
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  build-essential \
+  debhelper-compat \
+  dh-python \
+  dpkg-dev \
+  fakeroot \
+  jq \
+  python3 \
+  python3-jinja2
+rm -rf debian
+cp -a packaging/ubuntu-questing debian
+python3 - <<'PY'
+import json
+from pathlib import Path
+from jinja2 import Environment, FileSystemLoader
+
+manifest = json.loads(Path("manifest.json").read_text())
+env = Environment(loader=FileSystemLoader("debian"))
+for template_name, output_name in [("control.j2", "control"), ("copyright.j2", "copyright")]:
+    template_path = Path("debian") / template_name
+    if not template_path.exists():
+        continue
+    template = env.get_template(template_name)
+    (Path("debian") / output_name).write_text(template.render(**manifest))
+    template_path.unlink()
+PY
+dpkg-buildpackage -us -uc -b
+```
+
+## RPM packaging (Rocky example)
+```bash
+sudo dnf install -y \
+  gcc \
+  gcc-c++ \
+  jq \
+  make \
+  python3 \
+  python3-jinja2 \
+  rpm-build \
+  tar
+mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+PKG_NAME=$(jq -r '.name' manifest.json)
+PKG_VERSION=$(jq -r '.version' manifest.json)
+tar -czf "rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz" \
+  --exclude=.git \
+  --exclude=./rpmbuild \
+  --exclude=./**/node_modules \
+  --exclude=./**/dist \
+  --exclude=./.yarn \
+  --exclude=./.yarnrc.yml \
+  --transform "s,^,${PKG_NAME}-${PKG_VERSION}/," \
+  .
+python3 - <<'PY'
+import json
+from pathlib import Path
+from jinja2 import Environment, FileSystemLoader
+
+manifest = json.loads(Path("manifest.json").read_text())
+env = Environment(loader=FileSystemLoader("packaging/rocky-el9"))
+template = env.get_template("main.spec.j2")
+Path("rpmbuild/SPECS/main.spec").write_text(template.render(**manifest))
+PY
+rpmbuild -ba rpmbuild/SPECS/main.spec --define "_topdir $(pwd)/rpmbuild"
+```
+
+## CI packaging workflow
+The GitHub Actions workflow at `.github/workflows/build-packages-gh.yml` builds
+Debian/Ubuntu and Rocky artifacts in containerized jobs and uploads `.deb`,
+`.changes`, `.buildinfo`, and `.rpm` artifacts. Use it as the reference for
+supported distro targets and dependencies.
 # Usage
 ## Samba Management Tab
 The Samba tab in cockpit-file-sharing is a front end UI for the [net conf](https://linux.die.net/man/8/net) registry used by Samba. Any shares manually configured in `/etc/samba/smb.conf` won't show up in the UI, but they can be imported with the `Import` button at the bottom of the page. Your Samba configuration file must have `include = registry` in the `[global]` section, which can be automatically configured in one click in the UI.
