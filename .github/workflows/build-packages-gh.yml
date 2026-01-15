@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - gh-actions
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build-deb:
@@ -14,6 +17,7 @@ jobs:
       TERM: xterm-256color
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - platform: ubuntu-focal
@@ -114,6 +118,7 @@ jobs:
       TERM: xterm-256color
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - platform: rocky-el8
