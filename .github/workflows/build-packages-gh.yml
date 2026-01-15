@@ -1,0 +1,227 @@
+name: Build Packages (GitHub)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gh-actions
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TERM: xterm-256color
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: ubuntu-focal
+            container: ubuntu:focal
+            packaging_dir: ubuntu-focal
+          - platform: ubuntu-jammy
+            container: ubuntu:jammy
+            packaging_dir: ubuntu-jammy
+          - platform: ubuntu-questing
+            container: ubuntu:questing
+            packaging_dir: ubuntu-questing
+          - platform: debian-bookworm
+            container: debian:bookworm
+            packaging_dir: debian-bookworm
+    container:
+      image: ${{ matrix.container }}
+    steps:
+      - name: Install checkout dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            gnupg \
+            xz-utils
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Allow git in container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            debhelper-compat \
+            dh-python \
+            dpkg-dev \
+            fakeroot \
+            jq \
+            python3 \
+            python3-jinja2 \
+            python3-pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable Corepack (Yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@stable --activate
+
+      - name: Configure Yarn node linker
+        run: yarn config set nodeLinker node-modules
+
+      - name: Prepare debian packaging
+        run: |
+          rm -rf debian
+          cp -a "packaging/${{ matrix.packaging_dir }}" debian
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+
+          manifest = json.loads(Path("manifest.json").read_text())
+          env = Environment(loader=FileSystemLoader("debian"))
+
+          for template_name, output_name in [("control.j2", "control"), ("copyright.j2", "copyright")]:
+              template_path = Path("debian") / template_name
+              if not template_path.exists():
+                  continue
+              template = env.get_template(template_name)
+              rendered = template.render(**manifest)
+              (Path("debian") / output_name).write_text(rendered)
+              template_path.unlink()
+          PY
+
+      - name: Build .deb
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Set artifact path
+        run: echo "ARTIFACT_DIR=$(dirname "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.platform }}
+          path: |
+            ${{ env.ARTIFACT_DIR }}/*.deb
+            ${{ env.ARTIFACT_DIR }}/*.buildinfo
+            ${{ env.ARTIFACT_DIR }}/*.changes
+
+  build-rpm:
+    runs-on: ubuntu-latest
+    env:
+      TERM: xterm-256color
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: rocky-el8
+            container: rockylinux:8
+            packaging_dir: rocky-el8
+            release: el8
+            curl_pkg: curl
+          - platform: rocky-el9
+            container: rockylinux:9
+            packaging_dir: rocky-el9
+            release: el9
+            curl_pkg: curl-minimal
+    container:
+      image: ${{ matrix.container }}
+    steps:
+      - name: Install checkout dependencies
+        run: |
+          dnf -y install \
+            ca-certificates \
+            ${{ matrix.curl_pkg }} \
+            git \
+            gnupg2 \
+            xz
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Allow git in container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: |
+          dnf -y install \
+            findutils \
+            gcc \
+            gcc-c++ \
+            jq \
+            make \
+            python3 \
+            python3-jinja2 \
+            python3-pip \
+            redhat-rpm-config \
+            rpm-build \
+            tar \
+            which
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable Corepack (Yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@stable --activate
+
+      - name: Configure Yarn node linker
+        run: yarn config set nodeLinker node-modules
+
+      - name: Prepare RPM packaging
+        env:
+          PACKAGING_DIR: ${{ matrix.packaging_dir }}
+        run: |
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          PKG_NAME=$(jq -r '.name' manifest.json)
+          PKG_VERSION=$(jq -r '.version' manifest.json)
+          tar -czf "rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz" \
+            --exclude=.git \
+            --exclude=./rpmbuild \
+            --exclude=./**/node_modules \
+            --exclude=./**/dist \
+            --exclude=./.yarn \
+            --exclude=./.yarnrc.yml \
+            --transform "s,^,${PKG_NAME}-${PKG_VERSION}/," \
+            .
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+
+          manifest = json.loads(Path("manifest.json").read_text())
+          packaging_dir = os.environ["PACKAGING_DIR"]
+          env = Environment(loader=FileSystemLoader(f"packaging/{packaging_dir}"))
+          template = env.get_template("main.spec.j2")
+          rendered = template.render(**manifest)
+          Path("rpmbuild/SPECS/main.spec").write_text(rendered)
+          PY
+
+      - name: Build RPM
+        run: rpmbuild -ba rpmbuild/SPECS/main.spec --define "_topdir $(pwd)/rpmbuild"
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.platform }}
+          path: |
+            rpmbuild/RPMS/**/*.rpm
+            rpmbuild/SRPMS/*.rpm

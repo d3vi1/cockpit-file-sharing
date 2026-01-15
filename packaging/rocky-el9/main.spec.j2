@@ -19,6 +19,7 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 %setup -q
 
 %build
+yarn config set nodeLinker node-modules
 make OS_PACKAGE_RELEASE=el9
 
 %install
