@@ -122,10 +122,12 @@ jobs:
             container: rockylinux:8
             packaging_dir: rocky-el8
             release: el8
+            curl_pkg: curl
           - platform: rocky-el9
             container: rockylinux:9
             packaging_dir: rocky-el9
             release: el9
+            curl_pkg: curl-minimal
     container:
       image: ${{ matrix.container }}
     steps:
@@ -133,7 +135,7 @@ jobs:
         run: |
           dnf -y install \
             ca-certificates \
-            curl-minimal \
+            ${{ matrix.curl_pkg }} \
             git \
             gnupg2 \
             xz
