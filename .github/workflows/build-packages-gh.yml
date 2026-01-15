@@ -1,0 +1,205 @@
+name: Build Packages (GitHub)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gh-actions
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TERM: xterm-256color
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-focal
+            container: ubuntu:focal
+            packaging_dir: ubuntu-focal
+          - platform: ubuntu-jammy
+            container: ubuntu:jammy
+            packaging_dir: ubuntu-jammy
+          - platform: ubuntu-questing
+            container: ubuntu:questing
+            packaging_dir: ubuntu-questing
+          - platform: debian-bookworm
+            container: debian:bookworm
+            packaging_dir: debian-bookworm
+    container:
+      image: ${{ matrix.container }}
+    steps:
+      - name: Install checkout dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            gnupg \
+            xz-utils
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            debhelper-compat \
+            dh-python \
+            dpkg-dev \
+            fakeroot \
+            jq \
+            moreutils \
+            python3 \
+            python3-jinja2 \
+            python3-pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable Corepack (Yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@stable --activate
+
+      - name: Build UI assets
+        run: make
+
+      - name: Prepare debian packaging
+        run: |
+          rm -rf debian
+          cp -a "packaging/${{ matrix.packaging_dir }}" debian
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+
+          manifest = json.loads(Path("manifest.json").read_text())
+          env = Environment(loader=FileSystemLoader("debian"))
+
+          for template_name, output_name in [("control.j2", "control"), ("copyright.j2", "copyright")]:
+              template_path = Path("debian") / template_name
+              if not template_path.exists():
+                  continue
+              template = env.get_template(template_name)
+              rendered = template.render(**manifest)
+              (Path("debian") / output_name).write_text(rendered)
+              template_path.unlink()
+          PY
+
+      - name: Build .deb
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.platform }}
+          path: |
+            ../*.deb
+            ../*.buildinfo
+            ../*.changes
+
+  build-rpm:
+    runs-on: ubuntu-latest
+    env:
+      TERM: xterm-256color
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: rocky-el8
+            container: rockylinux:8
+            packaging_dir: rocky-el8
+            release: el8
+          - platform: rocky-el9
+            container: rockylinux:9
+            packaging_dir: rocky-el9
+            release: el9
+    container:
+      image: ${{ matrix.container }}
+    steps:
+      - name: Install checkout dependencies
+        run: |
+          dnf -y install \
+            ca-certificates \
+            curl \
+            git \
+            gnupg2 \
+            xz
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          dnf -y install \
+            findutils \
+            gcc \
+            gcc-c++ \
+            jq \
+            make \
+            moreutils \
+            python3 \
+            python3-jinja2 \
+            python3-pip \
+            redhat-rpm-config \
+            rpm-build \
+            tar \
+            which
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable Corepack (Yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@stable --activate
+
+      - name: Build UI assets
+        run: make OS_PACKAGE_RELEASE=${{ matrix.release }}
+
+      - name: Prepare RPM packaging
+        env:
+          PACKAGING_DIR: ${{ matrix.packaging_dir }}
+        run: |
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          PKG_NAME=$(jq -r '.name' manifest.json)
+          PKG_VERSION=$(jq -r '.version' manifest.json)
+          git archive --format=tar.gz --prefix="${PKG_NAME}-${PKG_VERSION}/" -o "rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz" HEAD
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+
+          manifest = json.loads(Path("manifest.json").read_text())
+          packaging_dir = os.environ["PACKAGING_DIR"]
+          env = Environment(loader=FileSystemLoader(f"packaging/{packaging_dir}"))
+          template = env.get_template("main.spec.j2")
+          rendered = template.render(**manifest)
+          Path("rpmbuild/SPECS/main.spec").write_text(rendered)
+          PY
+
+      - name: Build RPM
+        run: rpmbuild -ba rpmbuild/SPECS/main.spec --define "_topdir $(pwd)/rpmbuild"
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.platform }}
+          path: |
+            rpmbuild/RPMS/**/*.rpm
+            rpmbuild/SRPMS/*.rpm
