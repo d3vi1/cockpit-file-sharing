@@ -105,14 +105,17 @@ jobs:
       - name: Build .deb
         run: dpkg-buildpackage -us -uc -b
 
+      - name: Set artifact path
+        run: echo "ARTIFACT_DIR=$(dirname "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
+
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.platform }}
           path: |
-            ../*.deb
-            ../*.buildinfo
-            ../*.changes
+            ${{ env.ARTIFACT_DIR }}/*.deb
+            ${{ env.ARTIFACT_DIR }}/*.buildinfo
+            ${{ env.ARTIFACT_DIR }}/*.changes
 
   build-rpm:
     runs-on: ubuntu-latest
