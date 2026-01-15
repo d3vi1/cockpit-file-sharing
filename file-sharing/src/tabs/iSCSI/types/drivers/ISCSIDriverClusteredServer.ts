@@ -13,7 +13,7 @@ import { type Session } from "@/tabs/iSCSI/types/Session";
 import { type Target } from "@/tabs/iSCSI/types/Target";
 import { ISCSIDriver } from "@/tabs/iSCSI/types/drivers/ISCSIDriver";
 import {
-  BashCommand,
+  Command,
   Directory,
   ProcessError,
   safeJsonParse,
@@ -65,6 +65,13 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     this.targets = [];
     // console.log(" primary constructor server ", server);
   }
+
+  private ensureNoWhitespace(value: string, label: string) {
+    return /\s/.test(value)
+      ? errAsync(new ProcessError(`${label} must not contain whitespace.`))
+      : okAsync(value);
+  }
+
   initialize() {
     return new Directory(this.server, "/sys/kernel/scst_tgt").exists().andThen((exists) => {
       if (!exists) {
@@ -112,16 +119,19 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   }
 
   createTarget(target: Target): ResultAsync<void, ProcessError> {
-    const targetResourceName = `${this.resourceNamePrefix}_TARGET_${target.name}`;
-    const creationArugments = `ocf:45drives:iSCSITarget iqn=${target.name} op start timeout=20 op stop timeout=20 op monitor interval=20 timeout=40`;
-    return this.pcsResourceManager
-      .createResource(targetResourceName, creationArugments, PCSResourceType.TARGET, server)
-      .andThen((resource) => {
-        target.devicePath = resource.name;
-        return this.pcsResourceManager.addResourceToGroup(
-          resource,
-          new PCSResourceGroup(`${this.resourceGroupPrefix}_${resource.name}`)
-        );
+    return this.ensureNoWhitespace(target.name, "Target name")
+      .andThen(() => {
+        const targetResourceName = `${this.resourceNamePrefix}_TARGET_${target.name}`;
+        const creationArugments = `ocf:45drives:iSCSITarget iqn=${target.name} op start timeout=20 op stop timeout=20 op monitor interval=20 timeout=40`;
+        return this.pcsResourceManager
+          .createResource(targetResourceName, creationArugments, PCSResourceType.TARGET, server)
+          .andThen((resource) => {
+            target.devicePath = resource.name;
+            return this.pcsResourceManager.addResourceToGroup(
+              resource,
+              new PCSResourceGroup(`${this.resourceGroupPrefix}_${resource.name}`)
+            );
+          });
       })
       .map(() => undefined);
   }
@@ -148,7 +158,11 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   }
 
   addPortalToTarget(target: Target, portal: Portal) {
-    return userSettingsResult.andThen((userSettings) => {
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(target.name, "Target name"),
+      this.ensureNoWhitespace(portal.address, "Portal address"),
+    ]).andThen(() =>
+      userSettingsResult.andThen((userSettings) => {
       const createdResources: PCSResource[] = [];
 
       const updatedPortalList = [
@@ -217,7 +231,8 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
           createdResources.forEach((resource) => this.pcsResourceManager.deleteResource(resource));
           return err;
         });
-    });
+    })
+    );
   }
   private findLunBy(
     path: string,
@@ -245,39 +260,44 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     );
   }
   deletePortalFromTarget(target: Target, portal: Portal): ResultAsync<void, ProcessError> {
-    return this.findTargetPCSResource(target).andThen((targetResource) => {
-      const updatedPortalList = target.portals
-        .filter((existingPortal) => existingPortal !== portal)
-        .map((existingPortal) => existingPortal.address)
-        .join(", ");
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(target.name, "Target name"),
+      this.ensureNoWhitespace(portal.address, "Portal address"),
+    ]).andThen(() =>
+      this.findTargetPCSResource(target).andThen((targetResource) => {
+        const updatedPortalList = target.portals
+          .filter((existingPortal) => existingPortal !== portal)
+          .map((existingPortal) => existingPortal.address)
+          .join(", ");
 
-      return this.pcsResourceManager
-        .updateResource(targetResource, `portals='${updatedPortalList}'`)
-        .andThen(() => this.findPortblockPCSResource(target, portal, PCSResourceType.PORTBLOCK_OFF))
-        .andThen((resource) => {
-          if (resource !== undefined) {
-            return this.pcsResourceManager.deleteResource(resource);
-          }
+        return this.pcsResourceManager
+          .updateResource(targetResource, `portals='${updatedPortalList}'`)
+          .andThen(() => this.findPortblockPCSResource(target, portal, PCSResourceType.PORTBLOCK_OFF))
+          .andThen((resource) => {
+            if (resource !== undefined) {
+              return this.pcsResourceManager.deleteResource(resource);
+            }
 
-          return okAsync(undefined);
-        })
-        .andThen(() => this.findPortblockPCSResource(target, portal, PCSResourceType.PORTBLOCK_ON))
-        .andThen((resource) => {
-          if (resource !== undefined) {
-            return this.pcsResourceManager.deleteResource(resource);
-          }
+            return okAsync(undefined);
+          })
+          .andThen(() => this.findPortblockPCSResource(target, portal, PCSResourceType.PORTBLOCK_ON))
+          .andThen((resource) => {
+            if (resource !== undefined) {
+              return this.pcsResourceManager.deleteResource(resource);
+            }
 
-          return okAsync(undefined);
-        })
-        .andThen(() => this.findPortblockVIPResource(target, portal))
-        .andThen((resource) => {
-          if (resource !== undefined) {
-            return this.pcsResourceManager.deleteResource(resource);
-          }
+            return okAsync(undefined);
+          })
+          .andThen(() => this.findPortblockVIPResource(target, portal))
+          .andThen((resource) => {
+            if (resource !== undefined) {
+              return this.pcsResourceManager.deleteResource(resource);
+            }
 
-          return okAsync(undefined);
-        });
-    });
+            return okAsync(undefined);
+          });
+      })
+    );
   }
 
   addInitiatorGroupToTarget(
@@ -288,7 +308,8 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
 
     initiatorGroup.devicePath = target.devicePath;
 
-    return this.pcsResourceManager
+    return this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name").andThen(() =>
+      this.pcsResourceManager
       .fetchResourceByName(initiatorGroup.devicePath)
       .andThen((resource) => {
         if (!resource) {
@@ -310,7 +331,8 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
               .updateResource(targetResource, `initiator_groups='${updatedInitiatorList}'`)
               .map(() => undefined);
           });
-      });
+      })
+    );
   }
 
   deleteInitiatorGroupFromTarget(
@@ -319,13 +341,14 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   ): ResultAsync<void, ProcessError> {
     const self = this;
 
-    const ensureLuns =
-      Array.isArray(group.logicalUnitNumbers) && group.logicalUnitNumbers.length > 0
+    const ensureLuns = this.ensureNoWhitespace(group.name, "Initiator group name").andThen(() =>
+      (Array.isArray(group.logicalUnitNumbers) && group.logicalUnitNumbers.length > 0
         ? okAsync(group.logicalUnitNumbers)
         : this.getLogicalUnitNumbersOfInitiatorGroup(group).map((luns) => {
             group.logicalUnitNumbers = luns;
             return luns;
-          });
+          }))
+    );
 
     return ensureLuns
       .andThen(
@@ -370,7 +393,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       )
       .andThen(() =>
         self.server
-          .execute(new BashCommand(`pcs resource cleanup`, [], this.commandOptionsWrite))
+          .execute(new Command(["pcs", "resource", "cleanup"], this.commandOptionsWrite))
           .map(() => undefined)
       );
   }
@@ -382,30 +405,35 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     const self = this;
 
     // The PCS resource name lives in target.devicePath (e.g., "iscsi_TARGET_target1")
-    return this.pcsResourceManager
-      .fetchResourceByName(group.devicePath)
-      .andThen((targetResource) => {
-        if (!targetResource) {
-          return errAsync(new ProcessError("Could not find Target resource."));
-        }
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(group.name, "Initiator group name"),
+      this.ensureNoWhitespace(newInitiator.name, "Initiator name"),
+    ]).andThen(() =>
+      this.pcsResourceManager
+        .fetchResourceByName(group.devicePath)
+        .andThen((targetResource) => {
+          if (!targetResource) {
+            return errAsync(new ProcessError("Could not find Target resource."));
+          }
 
-        return self.pcsResourceManager
-          .fetchResourceInstanceAttributeValues({ name: targetResource.name }, ["initiator_groups"])
-          .andThen((attrs) => {
-            const existing = attrs.get("initiator_groups") ?? "";
-            const map = self.parseInitiatorGroups(existing);
+          return self.pcsResourceManager
+            .fetchResourceInstanceAttributeValues({ name: targetResource.name }, ["initiator_groups"])
+            .andThen((attrs) => {
+              const existing = attrs.get("initiator_groups") ?? "";
+              const map = self.parseInitiatorGroups(existing);
 
-            // merge (add group if it doesn't exist; dedupe IQNs)
-            const current = new Set(map.get(group.name) ?? []);
-            current.add(newInitiator.name);
-            map.set(group.name, Array.from(current));
+              // merge (add group if it doesn't exist; dedupe IQNs)
+              const current = new Set(map.get(group.name) ?? []);
+              current.add(newInitiator.name);
+              map.set(group.name, Array.from(current));
 
-            const updated = self.serializeInitiatorGroups(map);
-            return self.pcsResourceManager
-              .updateResource(targetResource, `initiator_groups='${updated}'`)
-              .map(() => undefined);
-          });
-      });
+              const updated = self.serializeInitiatorGroups(map);
+              return self.pcsResourceManager
+                .updateResource(targetResource, `initiator_groups='${updated}'`)
+                .map(() => undefined);
+            });
+        })
+    );
   }
 
   removeInitiatorFromGroup(
@@ -414,37 +442,42 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   ): ResultAsync<void, ProcessError> {
     const self = this;
 
-    return this.pcsResourceManager
-      .fetchResourceByName(group.devicePath)
-      .andThen((targetResource) => {
-        if (!targetResource) {
-          return errAsync(new ProcessError("Could not find Target resource."));
-        }
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(group.name, "Initiator group name"),
+      this.ensureNoWhitespace(initiator.name, "Initiator name"),
+    ]).andThen(() =>
+      this.pcsResourceManager
+        .fetchResourceByName(group.devicePath)
+        .andThen((targetResource) => {
+          if (!targetResource) {
+            return errAsync(new ProcessError("Could not find Target resource."));
+          }
 
-        return self.pcsResourceManager
-          .fetchResourceInstanceAttributeValues({ name: targetResource.name }, ["initiator_groups"])
-          .andThen((attrs) => {
-            const existing = attrs.get("initiator_groups") ?? "";
-            const map = self.parseInitiatorGroups(existing);
+          return self.pcsResourceManager
+            .fetchResourceInstanceAttributeValues({ name: targetResource.name }, ["initiator_groups"])
+            .andThen((attrs) => {
+              const existing = attrs.get("initiator_groups") ?? "";
+              const map = self.parseInitiatorGroups(existing);
 
-            // Remove IQN from the group (no-op if it isn't there)
-            const cur = new Set(map.get(group.name) ?? []);
-            const beforeSize = cur.size;
-            cur.delete(initiator.name);
+              // Remove IQN from the group (no-op if it isn't there)
+              const cur = new Set(map.get(group.name) ?? []);
+              const beforeSize = cur.size;
+              cur.delete(initiator.name);
 
-            const nextList = Array.from(cur);
-            map.set(group.name, nextList); // keep empty group as `Group:`
+              const nextList = Array.from(cur);
+              map.set(group.name, nextList); // keep empty group as `Group:`
 
-            const updated = self.serializeInitiatorGroups(map);
-            if (updated === existing) {
-              return okAsync<void>(undefined);
-            }
-            const param = `initiator_groups='${updated}'`;
-            return self.pcsResourceManager
-              .updateResource(targetResource, param)
-              .map(() => undefined);
-          });
-      });
+              const updated = self.serializeInitiatorGroups(map);
+              if (updated === existing) {
+                return okAsync<void>(undefined);
+              }
+              const param = `initiator_groups='${updated}'`;
+              return self.pcsResourceManager
+                .updateResource(targetResource, param)
+                .map(() => undefined);
+            });
+        })
+    );
   }
   // Add to your class
   private getPinNodeForGroup(group: PCSResourceGroup): ResultAsync<string, ProcessError> {
@@ -457,15 +490,19 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   ): ResultAsync<Server, ProcessError> {
     const self = this;
 
-    return this.pcsResourceManager
-      .fetchResourceByName(initiatorGroup.devicePath)
-      .andThen((targetResource) => {
-        if (!targetResource) {
-          return errAsync(new ProcessError("Could not find Target resource."));
-        }
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name"),
+      this.ensureNoWhitespace(logicalUnitNumber.name, "LUN name"),
+    ]).andThen(() =>
+      this.pcsResourceManager
+        .fetchResourceByName(initiatorGroup.devicePath)
+        .andThen((targetResource) => {
+          if (!targetResource) {
+            return errAsync(new ProcessError("Could not find Target resource."));
+          }
 
-        return new ResultAsync(
-          safeTry(async function* () {
+          return new ResultAsync(
+            safeTry(async function* () {
             const targetIQN = yield* self.pcsResourceManager
               .fetchResourceInstanceAttributeValue(targetResource, "iqn")
               .safeUnwrap();
@@ -541,9 +578,10 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
             const execServer = self.rbdManager.allServers[0];
             console.log(self.rbdManager.allServers[0]);
             return okAsync(new Server(pinNode));
-          })
-        );
-      });
+            })
+          );
+        })
+    );
   }
 
   resolveLogicalVolume(
@@ -553,7 +591,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   ): ResultAsync<LogicalVolume, Error> {
     const self = this;
     return server
-      .execute(new BashCommand(`lvs --reportformat json --units B`))
+      .execute(new Command(["lvs", "--reportformat", "json", "--units", "B"]))
       .map((proc) => proc.getStdout())
       .andThen(safeJsonParse<LogicalVolumeInfoJson>)
       .map((lvData) => {
@@ -565,7 +603,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       })
       .andThen((lvInfo) =>
         server
-          .execute(new BashCommand(`pvs -S vgname=${vgname} --reportformat json --units B`))
+          .execute(new Command(["pvs", "-S", `vgname=${vgname}`, "--reportformat", "json", "--units", "B"]))
           .map((proc) => proc.getStdout())
           .andThen(safeJsonParse<VolumeGroupInfoJson>)
           .map((pvData) => pvData?.report?.flatMap((r) => r.pv) ?? [])
@@ -671,7 +709,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       )
       .andThen(() => {
         return this.server
-          .execute(new BashCommand(`pcs resource cleanup`, [], this.commandOptionsWrite))
+          .execute(new Command(["pcs", "resource", "cleanup"], this.commandOptionsWrite))
           .map(() => undefined); // Ensures return type matches: ResultAsync<void, ProcessError>
       });
   }
@@ -680,10 +718,15 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     target: Target,
     chapConfiguration: CHAPConfiguration
   ): ResultAsync<void, ProcessError> {
-    return this.findTargetPCSResource(target).andThen((targetResource) =>
-      this.pcsResourceManager.updateResource(
-        targetResource,
-        `incoming_username='${chapConfiguration.username}' incoming_password='${chapConfiguration.password}'`
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(chapConfiguration.username, "CHAP username"),
+      this.ensureNoWhitespace(chapConfiguration.password, "CHAP password"),
+    ]).andThen(() =>
+      this.findTargetPCSResource(target).andThen((targetResource) =>
+        this.pcsResourceManager.updateResource(
+          targetResource,
+          `incoming_username='${chapConfiguration.username}' incoming_password='${chapConfiguration.password}'`
+        )
       )
     );
   }
@@ -1193,37 +1236,42 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   ) {
     const blockDevice = lun.blockDevice! as RadosBlockDevice;
     const server = blockDevice.server;
-    return server
-      .execute(
-        new BashCommand(
-          `rbd unmap ${blockDevice.parentPool.name}/${blockDevice.deviceName}`,
-          [],
-          this.commandOptionsWrite
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(targetIQN, "Target IQN"),
+      this.ensureNoWhitespace(initiatorGroupName, "Initiator group name"),
+      this.ensureNoWhitespace(blockDevice.filePath, "Block device path"),
+    ]).andThen(() =>
+      server
+        .execute(
+          new Command(
+            ["rbd", "unmap", `${blockDevice.parentPool.name}/${blockDevice.deviceName}`],
+            this.commandOptionsWrite
+          )
         )
-      )
-      .andThen(() =>
-        this.pcsResourceManager
-          .createResource(
-            `RBD_${blockDevice.deviceName}`,
-            `ocf:45drives:rbd name=${blockDevice.deviceName} pool=${blockDevice.parentPool.name} user=admin cephconf=/etc/ceph/ceph.conf op start timeout=60s interval=0 op stop timeout=60s interval=0 op monitor timeout=30s interval=15s`,
-            PCSResourceType.RBD,
+        .andThen(() =>
+          this.pcsResourceManager
+            .createResource(
+              `RBD_${blockDevice.deviceName}`,
+              `ocf:45drives:rbd name=${blockDevice.deviceName} pool=${blockDevice.parentPool.name} user=admin cephconf=/etc/ceph/ceph.conf op start timeout=60s interval=0 op stop timeout=60s interval=0 op monitor timeout=30s interval=15s`,
+              PCSResourceType.RBD,
+              server
+            )
+            .andThen((resource) =>
+              this.pcsResourceManager
+                .constrainResourceToGroup(resource, group, server)
+                .andThen(() => this.pcsResourceManager.orderResourceBeforeGroup(resource, group))
+            )
+        )
+        .andThen(() =>
+          this.pcsResourceManager.createResource(
+            `${this.resourceNamePrefix}_LUN_${blockDevice.deviceName}`,
+            `ocf:45drives:iSCSILogicalUnit implementation=scst target_iqn=${targetIQN} path=${blockDevice.filePath} lun=${lun.unitNumber} group=${initiatorGroupName} op start timeout=100 op stop timeout=100 op monitor interval=10 timeout=100`,
+            PCSResourceType.LUN,
             server
           )
-          .andThen((resource) =>
-            this.pcsResourceManager
-              .constrainResourceToGroup(resource, group, server)
-              .andThen(() => this.pcsResourceManager.orderResourceBeforeGroup(resource, group))
-          )
-      )
-      .andThen(() =>
-        this.pcsResourceManager.createResource(
-          `${this.resourceNamePrefix}_LUN_${blockDevice.deviceName}`,
-          `ocf:45drives:iSCSILogicalUnit implementation=scst target_iqn=${targetIQN} path=${blockDevice.filePath} lun=${lun.unitNumber} group=${initiatorGroupName} op start timeout=100 op stop timeout=100 op monitor interval=10 timeout=100`,
-          PCSResourceType.LUN,
-          server
         )
-      )
-      .andThen((resource) => this.pcsResourceManager.addResourceToGroup(resource, group));
+        .andThen((resource) => this.pcsResourceManager.addResourceToGroup(resource, group))
+    );
   }
 
   removeRBDAndRelatedResource(lun: LogicalUnitNumber, groupName: string, targetIQN: string) {
@@ -1274,9 +1322,19 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       // console.log(`pcs constraint location ${rid} rule id=${pinId} score=INFINITY '#uname' eq ${pinNode}`);
       await server
         .execute(
-          new BashCommand(
-            `pcs constraint location ${rid} rule id=${pinId} score=INFINITY '#uname' eq ${pinNode}`,
-            [],
+          new Command(
+            [
+              "pcs",
+              "constraint",
+              "location",
+              rid,
+              "rule",
+              `id=${pinId}`,
+              "score=INFINITY",
+              "#uname",
+              "eq",
+              pinNode,
+            ],
             this.commandOptionsWrite
           )
         )
@@ -1288,9 +1346,8 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       if (beforeId) {
         return server
           .execute(
-            new BashCommand(
-              `pcs resource group add ${group.name} ${resId} --before ${beforeId}`,
-              [],
+            new Command(
+              ["pcs", "resource", "group", "add", group.name, resId, "--before", beforeId],
               this.commandOptionsWrite
             )
           )
@@ -1303,7 +1360,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       for (const pid of createdPinIds) {
         // console.log(`Removing pin constraint ${pid}`);
         await server.execute(
-          new BashCommand(`pcs constraint remove ${pid}`, [], this.commandOptionsWrite)
+          new Command(["pcs", "constraint", "remove", pid], this.commandOptionsWrite)
         ).then(
           () => undefined,
           () => undefined
@@ -1312,9 +1369,16 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     };
 
     // 1) Deactivate LV so agents control it
-    return (
+    return ResultAsync.combine([
+      this.ensureNoWhitespace(targetIQN, "Target IQN"),
+      this.ensureNoWhitespace(initiatorGroupName, "Initiator group name"),
+      this.ensureNoWhitespace(pinNode, "Pinned node"),
+      this.ensureNoWhitespace(vgName, "Volume group name"),
+      this.ensureNoWhitespace(lvName, "Logical volume name"),
+      this.ensureNoWhitespace(lvPath, "Logical volume path"),
+    ]).andThen(() =>
       server
-        .execute(new BashCommand(`lvchange -an ${vgName}/${lvName}`, [], this.commandOptionsWrite))
+        .execute(new Command(["lvchange", "-an", `${vgName}/${lvName}`], this.commandOptionsWrite))
 
         // 2) RBDs: unmap -> create (disabled) -> pin (do NOT enable yet)
         .andThen(
@@ -1328,7 +1392,8 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
 
                   yield* server
                     .execute(
-                      new BashCommand(`rbd unmap ${pool}/${rbdName} || true`, [], this.commandOptionsWrite)
+                      new Command(["rbd", "unmap", `${pool}/${rbdName}`], this.commandOptionsWrite),
+                      false
                     )
                     .safeUnwrap();
 
@@ -1459,9 +1524,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
           return ResultAsync.fromPromise(removePinsBatch(), (e) => new ProcessError(String(e)));
         })
         .andThen(() =>
-          self.server.execute(
-            new BashCommand(`pcs resource cleanup`, [], this.commandOptionsWrite)
-          )
+          self.server.execute(new Command(["pcs", "resource", "cleanup"], this.commandOptionsWrite))
         )
     );
   }

@@ -1,5 +1,5 @@
 import { ConfigurationManager } from '@/tabs/iSCSI/types/ConfigurationManager';
-import { Directory, File, type CommandOptions } from "@45drives/houston-common-lib";
+import { Directory, File, type CommandOptions, Path } from "@45drives/houston-common-lib";
 import { VirtualDevice, DeviceType } from "@/tabs/iSCSI/types/VirtualDevice";
 import { CHAPConfiguration, CHAPType } from "@/tabs/iSCSI/types/CHAPConfiguration";
 import { type Connection } from "@/tabs/iSCSI/types/Connection";
@@ -10,8 +10,8 @@ import { Portal } from "@/tabs/iSCSI/types/Portal";
 import { type Session } from "@/tabs/iSCSI/types/Session";
 import { type Target } from "@/tabs/iSCSI/types/Target";
 import { ISCSIDriver } from "@/tabs/iSCSI/types/drivers/ISCSIDriver";
-import { BashCommand, Command, ParsingError, ProcessError, Server, StringToIntCaster } from "@45drives/houston-common-lib";
-import { ResultAsync, err, ok, okAsync, safeTry } from "neverthrow";
+import { Command, ParsingError, ProcessError, Server, StringToIntCaster } from "@45drives/houston-common-lib";
+import { ResultAsync, err, errAsync, ok, okAsync, safeTry } from "neverthrow";
 
 export class ISCSIDriverSingleServer implements ISCSIDriver {
 
@@ -31,6 +31,30 @@ export class ISCSIDriverSingleServer implements ISCSIDriver {
         this.configurationManager = new ConfigurationManager(server);
     }
 
+    private ensureNoWhitespace(value: string, label: string) {
+        return /\s/.test(value)
+            ? errAsync(new ProcessError(`${label} must not contain whitespace.`))
+            : okAsync(value);
+    }
+
+    private ensureAbsolutePath(value: string, label: string) {
+        return new Path(value).isAbsolute()
+            ? okAsync(value)
+            : errAsync(new ProcessError(`${label} must be an absolute path.`));
+    }
+
+    private ensurePositiveNumber(value: number, label: string) {
+        return Number.isFinite(value) && value > 0
+            ? okAsync(value)
+            : errAsync(new ProcessError(`${label} must be a positive number.`));
+    }
+
+    private writeScstMgmt(path: string, content: string): ResultAsync<void, ProcessError> {
+        return new File(this.server, path)
+            .write(`${content}\n`, this.commandOptionsWrite)
+            .map(() => undefined);
+    }
+
     initialize(): ResultAsync<ISCSIDriver, ProcessError> {
         return new Directory(this.server, "/sys/kernel/scst_tgt").exists()
         .andThen((exists) => {
@@ -43,89 +67,201 @@ export class ISCSIDriverSingleServer implements ISCSIDriver {
     }
 
     addVirtualDevice(virtualDevice: VirtualDevice): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "add_device $1 $2" > $3`, [virtualDevice.deviceName, "filename=" + virtualDevice.filePath + ";blocksize=" + virtualDevice.blockSize, this.deviceTypeToHandlerDirectory[virtualDevice.deviceType] + "/mgmt"], this.commandOptionsWrite))
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(virtualDevice.deviceName, "Device name"),
+            this.ensureAbsolutePath(virtualDevice.filePath, "Device path")
+              .andThen((path) => this.ensureNoWhitespace(path, "Device path")),
+            this.ensurePositiveNumber(virtualDevice.blockSize, "Block size"),
+        ]).andThen(() =>
+            this.writeScstMgmt(
+                this.deviceTypeToHandlerDirectory[virtualDevice.deviceType] + "/mgmt",
+                `add_device ${virtualDevice.deviceName} filename=${virtualDevice.filePath};blocksize=${virtualDevice.blockSize}`
+            )
+        )
         .andThen(() => this.configurationManager.saveCurrentConfiguration())
         .map(() => undefined);
     }
 
     removeVirtualDevice(virtualDevice: VirtualDevice): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del_device $1" > $2`, [virtualDevice.deviceName, this.deviceTypeToHandlerDirectory[virtualDevice.deviceType] + "/mgmt"], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return this.ensureNoWhitespace(virtualDevice.deviceName, "Device name")
+            .andThen(() =>
+                this.writeScstMgmt(
+                    this.deviceTypeToHandlerDirectory[virtualDevice.deviceType] + "/mgmt",
+                    `del_device ${virtualDevice.deviceName}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     createTarget(target: Target): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "add_target $1" > $2`, [target.name, this.targetManagementDirectory + "/mgmt"], this.commandOptionsWrite))
-        .andThen(() => this.server.execute(new BashCommand(`echo 1 > $1`, [this.targetManagementDirectory + "/enabled"], this.commandOptionsWrite)))
-        .andThen(() => this.server.execute(new BashCommand(`echo 1 > $1`, [`${this.targetManagementDirectory}/${target.name}/enabled`], this.commandOptionsWrite)))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return this.ensureNoWhitespace(target.name, "Target name")
+            .andThen(() =>
+                this.writeScstMgmt(this.targetManagementDirectory + "/mgmt", `add_target ${target.name}`)
+            )
+            .andThen(() => this.writeScstMgmt(this.targetManagementDirectory + "/enabled", "1"))
+            .andThen(() =>
+                this.writeScstMgmt(`${this.targetManagementDirectory}/${target.name}/enabled`, "1")
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     removeTarget(target: Target): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del_target $1" > $2`, [target.name, this.targetManagementDirectory + "/mgmt"], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return this.ensureNoWhitespace(target.name, "Target name")
+            .andThen(() =>
+                this.writeScstMgmt(this.targetManagementDirectory + "/mgmt", `del_target ${target.name}`)
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     addPortalToTarget(target: Target, portal: Portal): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "add_target_attribute $1 $2" > $3`, [target.name, `allowed_portal=${portal.address}`, `${this.getTargetPath(target)}/../mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(target.name, "Target name"),
+            this.ensureNoWhitespace(portal.address, "Portal address"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${this.getTargetPath(target)}/../mgmt`,
+                    `add_target_attribute ${target.name} allowed_portal=${portal.address}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     deletePortalFromTarget(target: Target, portal: Portal): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del_target_attribute $1 $2" > $3`, [target.name, `allowed_portal=${portal.address}`, `${this.getTargetPath(target)}/../mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(target.name, "Target name"),
+            this.ensureNoWhitespace(portal.address, "Portal address"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${this.getTargetPath(target)}/../mgmt`,
+                    `del_target_attribute ${target.name} allowed_portal=${portal.address}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     addInitiatorGroupToTarget(target: Target, initiatorGroup: InitiatorGroup): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "create $1" > $2`, [initiatorGroup.name, `${this.getTargetPath(target)}/ini_groups/mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(target.name, "Target name"),
+            this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${this.getTargetPath(target)}/ini_groups/mgmt`,
+                    `create ${initiatorGroup.name}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     deleteInitiatorGroupFromTarget(target: Target, initiatorGroup: InitiatorGroup): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del $1" > $2`, [initiatorGroup.name, `${this.getTargetPath(target)}/ini_groups/mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(target.name, "Target name"),
+            this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${this.getTargetPath(target)}/ini_groups/mgmt`,
+                    `del ${initiatorGroup.name}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     addInitiatorToGroup(initiatorGroup: InitiatorGroup, initiator: Initiator): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "add $1" > $2`, [initiator.name, `${initiatorGroup.devicePath}/initiators/mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name"),
+            this.ensureNoWhitespace(initiator.name, "Initiator name"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${initiatorGroup.devicePath}/initiators/mgmt`,
+                    `add ${initiator.name}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     removeInitiatorFromGroup(initiatorGroup: InitiatorGroup, initiator: Initiator): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del $1" > $2`, [initiator.name, `${initiatorGroup.devicePath}/initiators/mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name"),
+            this.ensureNoWhitespace(initiator.name, "Initiator name"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${initiatorGroup.devicePath}/initiators/mgmt`,
+                    `del ${initiator.name}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     addLogicalUnitNumberToGroup(initiatorGroup: InitiatorGroup, logicalUnitNumber: LogicalUnitNumber): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "add $1 $2" > $3`, [logicalUnitNumber.name, logicalUnitNumber.unitNumber.toString(), `${initiatorGroup.devicePath}/luns/mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name"),
+            this.ensureNoWhitespace(logicalUnitNumber.name, "LUN name"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${initiatorGroup.devicePath}/luns/mgmt`,
+                    `add ${logicalUnitNumber.name} ${logicalUnitNumber.unitNumber}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     removeLogicalUnitNumberFromGroup(initiatorGroup: InitiatorGroup, logicalUnitNumber: LogicalUnitNumber): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del $1" > $2`, [logicalUnitNumber.unitNumber.toString(), `${initiatorGroup.devicePath}/luns/mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return this.ensureNoWhitespace(initiatorGroup.name, "Initiator group name")
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${initiatorGroup.devicePath}/luns/mgmt`,
+                    `del ${logicalUnitNumber.unitNumber}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     addCHAPConfigurationToTarget(target: Target, chapConfiguration: CHAPConfiguration): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "add_target_attribute $1 $2" > $3`, [target.name, `${chapConfiguration.chapType}=${chapConfiguration.username} ${chapConfiguration.password}`, `${this.getTargetPath(target)}/../mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(target.name, "Target name"),
+            this.ensureNoWhitespace(chapConfiguration.username, "CHAP username"),
+            this.ensureNoWhitespace(chapConfiguration.password, "CHAP password"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${this.getTargetPath(target)}/../mgmt`,
+                    `add_target_attribute ${target.name} ${chapConfiguration.chapType}=${chapConfiguration.username} ${chapConfiguration.password}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
 
     removeCHAPConfigurationFromTarget(target: Target, chapConfiguration: CHAPConfiguration): ResultAsync<void, ProcessError> {
-        return this.server.execute(new BashCommand(`echo "del_target_attribute $1 $2" > $3`, [target.name, `${chapConfiguration.chapType}=${chapConfiguration.username}`, `${this.getTargetPath(target)}/../mgmt`], this.commandOptionsWrite))
-        .andThen(() => this.configurationManager.saveCurrentConfiguration())
-        .map(() => undefined);
+        return ResultAsync.combine([
+            this.ensureNoWhitespace(target.name, "Target name"),
+            this.ensureNoWhitespace(chapConfiguration.username, "CHAP username"),
+        ])
+            .andThen(() =>
+                this.writeScstMgmt(
+                    `${this.getTargetPath(target)}/../mgmt`,
+                    `del_target_attribute ${target.name} ${chapConfiguration.chapType}=${chapConfiguration.username}`
+                )
+            )
+            .andThen(() => this.configurationManager.saveCurrentConfiguration())
+            .map(() => undefined);
     }
     private getUsedByIscsiDeviceNames(): ResultAsync<Set<string>, ProcessError> {
         return this.server
