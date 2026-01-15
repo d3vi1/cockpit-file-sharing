@@ -35,15 +35,26 @@ jobs:
     container:
       image: ${{ matrix.container }}
     steps:
+      - name: Allow man pages for alternatives
+        run: |
+          if [ -f /etc/dpkg/dpkg.cfg.d/excludes ]; then
+            sed -i '/^path-exclude=\/usr\/share\/man\//d' /etc/dpkg/dpkg.cfg.d/excludes
+            sed -i '/^path-exclude=\/usr\/share\/doc\//d' /etc/dpkg/dpkg.cfg.d/excludes
+          fi
+
       - name: Install checkout dependencies
         run: |
           apt-get update
+          apt-get install -y --no-install-recommends apt-utils
           apt-get install -y --no-install-recommends \
             ca-certificates \
             curl \
             git \
             gnupg \
             xz-utils
+
+      - name: Configure git defaults
+        run: git config --global init.defaultBranch main
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,6 +90,11 @@ jobs:
 
       - name: Configure Yarn node linker
         run: yarn config set nodeLinker node-modules
+
+      - name: Suppress non-actionable Yarn peer warnings
+        run: >
+          yarn config set --home logFilters --json
+          '[{"code":"YN0002","level":"discard"},{"code":"YN0060","level":"discard"},{"code":"YN0086","level":"discard"}]'
 
       - name: Prepare debian packaging
         run: |
@@ -148,6 +164,9 @@ jobs:
             gnupg2 \
             xz
 
+      - name: Configure git defaults
+        run: git config --global init.defaultBranch main
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -184,6 +203,11 @@ jobs:
 
       - name: Configure Yarn node linker
         run: yarn config set nodeLinker node-modules
+
+      - name: Suppress non-actionable Yarn peer warnings
+        run: >
+          yarn config set --home logFilters --json
+          '[{"code":"YN0002","level":"discard"},{"code":"YN0060","level":"discard"},{"code":"YN0086","level":"discard"}]'
 
       - name: Prepare RPM packaging
         env:
