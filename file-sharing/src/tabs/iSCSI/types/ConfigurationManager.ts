@@ -1,11 +1,13 @@
 import { useUserSettings } from "@/common/user-settings";
 import {
-  BashCommand,
+  Command,
   ProcessError,
   type Server,
   File,
   type CommandOptions,
+  Path,
 } from "@45drives/houston-common-lib";
+import { errAsync, okAsync } from "neverthrow";
 import { ResultAsync } from "neverthrow";
 
 const userSettingsResult = ResultAsync.fromSafePromise(useUserSettings(true));
@@ -13,6 +15,16 @@ const userSettingsResult = ResultAsync.fromSafePromise(useUserSettings(true));
 export class ConfigurationManager {
     server: Server;
     private commandOptionsWrite: CommandOptions = { superuser: "try" };
+
+    private ensureAbsolutePath(path: string, label: string) {
+      if (!new Path(path).isAbsolute()) {
+        return errAsync(new ProcessError(`${label} must be an absolute path.`));
+      }
+      if (/[\r\n]/.test(path)) {
+        return errAsync(new ProcessError(`${label} must be a single line.`));
+      }
+      return okAsync(path);
+    }
     
     constructor(server: Server) {
         this.server = server;
@@ -20,78 +32,68 @@ export class ConfigurationManager {
 
     exportConfiguration(): ResultAsync<string, ProcessError> {
         return userSettingsResult.andThen((userSettings) => {
+          return this.ensureAbsolutePath(userSettings.value.iscsi.confPath, "iSCSI config path")
+            .andThen((confPath) => {
           return this.server
             .execute(
-              new BashCommand(
-                `scstadmin -write_config ${userSettings.value.iscsi.confPath}`,
-                [],
-                this.commandOptionsWrite
-              )
+              new Command(["scstadmin", "-write_config", confPath], this.commandOptionsWrite)
             )
             .andThen(() =>
               this.server
-                .execute(
-                  new BashCommand(
-                    `cat ${userSettings.value.iscsi.confPath}`,
-                    [],
-                    this.commandOptionsWrite
-                  )
-                )
+                .execute(new Command(["cat", confPath], this.commandOptionsWrite))
                 .map((proc) => proc.getStdout())
             );
+            });
         });
     }
 
     importConfiguration(newConfig: string) {
         return userSettingsResult.andThen((userSettings) => {
-            return new File(this.server, userSettings.value.iscsi.confPath)
+            return this.ensureAbsolutePath(userSettings.value.iscsi.confPath, "iSCSI config path")
+              .andThen((confPath) => {
+            return new File(this.server, confPath)
                 .create(true, this.commandOptionsWrite)
                 .andThen((file) => file.write(newConfig, this.commandOptionsWrite))
                 .andThen(() =>
                   this.server.execute(
-                    new BashCommand(
-                      `scstadmin -check_config ${userSettings.value.iscsi.confPath}`,
-                      [],
-                      this.commandOptionsWrite
-                    )
+                    new Command(["scstadmin", "-check_config", confPath], this.commandOptionsWrite)
                   )
                 )
                 .map(() =>
                   this.server.execute(
-                    new BashCommand(
-                      `scstadmin -config ${userSettings.value.iscsi.confPath} -force -noprompt`,
-                      [],
+                    new Command(
+                      ["scstadmin", "-config", confPath, "-force", "-noprompt"],
                       this.commandOptionsWrite
                     )
                   )
                 )
                 .mapErr(() => new ProcessError("Config file syntax validation failed."))
+              });
         });
     }
 
     saveCurrentConfiguration(): ResultAsync<File, ProcessError> {
         return userSettingsResult.andThen((userSettings) => {
-            return new File(this.server, userSettings.value.iscsi.confPath)
+            return this.ensureAbsolutePath(userSettings.value.iscsi.confPath, "iSCSI config path")
+              .andThen((confPath) => {
+            return new File(this.server, confPath)
                 .create(true, this.commandOptionsWrite)
                 .andThen((file) =>
                     this.exportConfiguration()
                         .map((config) => file.write(config, this.commandOptionsWrite))
                         .andThen(() =>
                           this.server.execute(
-                            new BashCommand(`systemctl enable scst`, [], this.commandOptionsWrite)
+                            new Command(["systemctl", "enable", "scst"], this.commandOptionsWrite)
                           )
                         )
                         .andThen(() =>
                           this.server.execute(
-                            new BashCommand(
-                              `scstadmin -config ${userSettings.value.iscsi.confPath}`,
-                              [],
-                              this.commandOptionsWrite
-                            )
+                            new Command(["scstadmin", "-config", confPath], this.commandOptionsWrite)
                           )
                         )
                         .map(() => file)
                 );
+              });
         });
     }
 }
