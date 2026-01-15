@@ -69,7 +69,11 @@ const defaultSettings = (): UserSettings => ({
 
 const configPath = "/etc/cockpit-file-sharing.conf.json";
 
-const configFile = cockpit.file(configPath, {
+const configFileRead = cockpit.file(configPath, {
+  syntax: JSON,
+});
+
+const configFileWrite = cockpit.file(configPath, {
   superuser: "try",
   syntax: JSON,
 });
@@ -77,7 +81,7 @@ const configFile = cockpit.file(configPath, {
 const config = ref(defaultSettings());
 
 const configFileReadPromise = new Promise<Ref<UserSettings>>((resolve) => {
-  configFile.watch(
+  configFileRead.watch(
     (contents: Partial<UserSettings> | null) => {
       if (contents !== null) {
         config.value = {
@@ -114,7 +118,7 @@ const configFileReadPromise = new Promise<Ref<UserSettings>>((resolve) => {
 
 const computedSettingsRef = computed({
   get: () => config.value,
-  set: (newConfig) => configFile.replace(newConfig),
+  set: (newConfig) => configFileWrite.replace(newConfig),
 });
 
 export function useUserSettings(waitUntilRead?: false): WritableComputedRef<UserSettings>;

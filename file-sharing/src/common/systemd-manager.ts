@@ -123,15 +123,27 @@ export class SystemdManagerSingleServer implements ISystemdManager {
     this.iniParser = IniSyntax({ duplicateKey: "append", paramIndent: "" });
   }
 
-  private systemctlCommand(command: string, ...args: string[]) {
-    return new Command(["systemctl", `--${this.serviceManager}`, command, ...args], {
+  private systemctlCommand(
+    command: string,
+    args: string[] = [],
+    commandOptions: { superuser?: "try" } = {}
+  ) {
+    return new Command(["systemctl", `--${this.serviceManager}`, command, ...args], commandOptions);
+  }
+
+  private systemctlRead(command: string, ...args: string[]) {
+    return this.systemctlCommand(command, args);
+  }
+
+  private systemctlWrite(command: string, ...args: string[]) {
+    return this.systemctlCommand(command, args, {
       superuser: this.serviceManager === "system" ? "try" : undefined,
     });
   }
 
   private getUnitProperty(unit: SystemdUnit, property: string) {
     return this.server
-      .execute(this.systemctlCommand("show", unit.name, `--property=${property}`, "--value"))
+      .execute(this.systemctlRead("show", unit.name, `--property=${property}`, "--value"))
       .map((proc) => proc.getStdout().trim());
   }
 
@@ -158,7 +170,7 @@ export class SystemdManagerSingleServer implements ISystemdManager {
   ): ResultAsync<SystemdUnit<T>[], ProcessError | ParsingError> {
     return this.server
       .execute(
-        this.systemctlCommand(
+        this.systemctlRead(
           "list-unit-files",
           ...(type ? [`--type=${type}`] : []),
           "--output=json"
@@ -206,51 +218,51 @@ export class SystemdManagerSingleServer implements ISystemdManager {
       .andThen((unit) => this.getUnitFilePath(unit).map((path) => new File(this.server, path)))
       .andThen((unitFile) => unitFile.assertIsFile())
       .andThen((unitFile) => unitFile.remove({ superuser: "try" }))
-      .andThen(() => this.server.execute(this.systemctlCommand("daemon-reload")))
+      .andThen(() => this.server.execute(this.systemctlWrite("daemon-reload")))
       .map(() => unit);
   }
 
   checkEnabled(unit: SystemdUnit): ResultAsync<boolean, ProcessError | ParsingError> {
     return this.server
-      .execute(this.systemctlCommand("is-enabled", unit.name), false)
+      .execute(this.systemctlRead("is-enabled", unit.name), false)
       .map((proc) => proc.exitStatus === 0);
   }
 
   enable(unit: SystemdUnit, now?: "now"): ResultAsync<typeof unit, ProcessError | ParsingError> {
     return this.server
-      .execute(this.systemctlCommand("enable", ...(now ? ["--now"] : []), unit.name), true)
+      .execute(this.systemctlWrite("enable", ...(now ? ["--now"] : []), unit.name), true)
       .map(() => unit);
   }
 
   disable(unit: SystemdUnit, now?: "now"): ResultAsync<typeof unit, ProcessError | ParsingError> {
     return this.server
-      .execute(this.systemctlCommand("disable", ...(now ? ["--now"] : []), unit.name), true)
+      .execute(this.systemctlWrite("disable", ...(now ? ["--now"] : []), unit.name), true)
       .map(() => unit);
   }
 
   checkActive(unit: SystemdUnit): ResultAsync<boolean, ProcessError | ParsingError> {
     return this.server
-      .execute(this.systemctlCommand("is-active", unit.name), false)
+      .execute(this.systemctlRead("is-active", unit.name), false)
       .map((proc) => proc.exitStatus === 0);
   }
 
   start(unit: SystemdUnit): ResultAsync<typeof unit, ProcessError | ParsingError> {
-    return this.server.execute(this.systemctlCommand("start", unit.name), true).map(() => unit);
+    return this.server.execute(this.systemctlWrite("start", unit.name), true).map(() => unit);
   }
 
   restart(unit: SystemdUnit): ResultAsync<typeof unit, ProcessError | ParsingError> {
-    return this.server.execute(this.systemctlCommand("restart", unit.name), true).map(() => unit);
+    return this.server.execute(this.systemctlWrite("restart", unit.name), true).map(() => unit);
   }
 
   stop(unit: SystemdUnit): ResultAsync<typeof unit, ProcessError | ParsingError> {
-    return this.server.execute(this.systemctlCommand("stop", unit.name), true).map(() => unit);
+    return this.server.execute(this.systemctlWrite("stop", unit.name), true).map(() => unit);
   }
 
   getSettings<T extends SystemdUnitType>(
     unit: SystemdUnit<T>
   ): ResultAsync<SystemdUnitSettings<T>, ProcessError | ParsingError> {
     return this.server
-      .execute(this.systemctlCommand("cat", unit.name))
+      .execute(this.systemctlRead("cat", unit.name))
       .map((proc) => proc.getStdout())
       .andThen((unitSettingsText) =>
         this.iniParser.apply(unitSettingsText).map((settings) => settings as SystemdUnitSettings<T>)
@@ -282,7 +294,7 @@ export class SystemdManagerSingleServer implements ISystemdManager {
                 new File(this.server, filePath).write(settingsText, { superuser: "try" })
               )
           )
-          .andThen(() => this.server.execute(this.systemctlCommand("daemon-reload")))
+          .andThen(() => this.server.execute(this.systemctlWrite("daemon-reload")))
           .map(() => unit);
   }
 

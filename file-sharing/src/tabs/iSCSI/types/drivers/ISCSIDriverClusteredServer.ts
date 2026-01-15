@@ -20,6 +20,7 @@ import {
   server,
   Server,
   StringToIntCaster,
+  type CommandOptions,
 } from "@45drives/houston-common-lib";
 import { ResultAsync, err, errAsync, ok, okAsync, safeTry } from "neverthrow";
 import { useUserSettings } from "@/common/user-settings";
@@ -39,6 +40,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
   configurationManager: ConfigurationManager;
   rbdManager: RBDManager;
   pcsResourceManager: PCSResourceManager;
+  private commandOptionsWrite: CommandOptions = { superuser: "try" };
 
   singleServerDriver: ISCSIDriverSingleServer | undefined;
 
@@ -367,7 +369,9 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
         })
       )
       .andThen(() =>
-        self.server.execute(new BashCommand(`pcs resource cleanup`)).map(() => undefined)
+        self.server
+          .execute(new BashCommand(`pcs resource cleanup`, [], this.commandOptionsWrite))
+          .map(() => undefined)
       );
   }
 
@@ -666,7 +670,9 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
           )
       )
       .andThen(() => {
-        return this.server.execute(new BashCommand(`pcs resource cleanup`)).map(() => undefined); // Ensures return type matches: ResultAsync<void, ProcessError>
+        return this.server
+          .execute(new BashCommand(`pcs resource cleanup`, [], this.commandOptionsWrite))
+          .map(() => undefined); // Ensures return type matches: ResultAsync<void, ProcessError>
       });
   }
 
@@ -1189,7 +1195,11 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     const server = blockDevice.server;
     return server
       .execute(
-        new BashCommand(`rbd unmap ${blockDevice.parentPool.name}/${blockDevice.deviceName}`)
+        new BashCommand(
+          `rbd unmap ${blockDevice.parentPool.name}/${blockDevice.deviceName}`,
+          [],
+          this.commandOptionsWrite
+        )
       )
       .andThen(() =>
         this.pcsResourceManager
@@ -1265,7 +1275,9 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       await server
         .execute(
           new BashCommand(
-            `pcs constraint location ${rid} rule id=${pinId} score=INFINITY '#uname' eq ${pinNode}`
+            `pcs constraint location ${rid} rule id=${pinId} score=INFINITY '#uname' eq ${pinNode}`,
+            [],
+            this.commandOptionsWrite
           )
         )
         .map(() => undefined);
@@ -1276,7 +1288,11 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
       if (beforeId) {
         return server
           .execute(
-            new BashCommand(`pcs resource group add ${group.name} ${resId} --before ${beforeId}`)
+            new BashCommand(
+              `pcs resource group add ${group.name} ${resId} --before ${beforeId}`,
+              [],
+              this.commandOptionsWrite
+            )
           )
           .map(() => res);
       }
@@ -1286,7 +1302,9 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     const removePinsBatch = async () => {
       for (const pid of createdPinIds) {
         // console.log(`Removing pin constraint ${pid}`);
-        await server.execute(new BashCommand(`pcs constraint remove ${pid}`)).then(
+        await server.execute(
+          new BashCommand(`pcs constraint remove ${pid}`, [], this.commandOptionsWrite)
+        ).then(
           () => undefined,
           () => undefined
         ); // ignore if already gone
@@ -1296,7 +1314,7 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
     // 1) Deactivate LV so agents control it
     return (
       server
-        .execute(new BashCommand(`lvchange -an ${vgName}/${lvName}`))
+        .execute(new BashCommand(`lvchange -an ${vgName}/${lvName}`, [], this.commandOptionsWrite))
 
         // 2) RBDs: unmap -> create (disabled) -> pin (do NOT enable yet)
         .andThen(
@@ -1309,7 +1327,9 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
                   const rbdRid = `RBD_${rbdName}`;
 
                   yield* server
-                    .execute(new BashCommand(`rbd unmap ${pool}/${rbdName} || true`))
+                    .execute(
+                      new BashCommand(`rbd unmap ${pool}/${rbdName} || true`, [], this.commandOptionsWrite)
+                    )
                     .safeUnwrap();
 
                   const r = yield* self.pcsResourceManager
@@ -1438,7 +1458,11 @@ export class ISCSIDriverClusteredServer implements ISCSIDriver {
         .andThen(() => {
           return ResultAsync.fromPromise(removePinsBatch(), (e) => new ProcessError(String(e)));
         })
-        .andThen(() => self.server.execute(new BashCommand(`pcs resource cleanup`)))
+        .andThen(() =>
+          self.server.execute(
+            new BashCommand(`pcs resource cleanup`, [], this.commandOptionsWrite)
+          )
+        )
     );
   }
 

@@ -7,7 +7,7 @@ import {
   type CommandOptions,
   Command,
 } from "@45drives/houston-common-lib";
-import { ResultAsync } from "neverthrow";
+import { ResultAsync, okAsync } from "neverthrow";
 import { NFSExportsParser } from "@/tabs/nfs/exports-parser";
 import { Hooks, executeHookCallbacks } from "@/common/hooks";
 
@@ -24,7 +24,8 @@ export interface INFSManager {
 
 export class NFSManagerSingleServer implements INFSManager {
   private exportsFile: File;
-  private commandOptions: CommandOptions = { superuser: "try" };
+  private commandOptionsRead: CommandOptions = {};
+  private commandOptionsWrite: CommandOptions = { superuser: "try" };
   private nfsExportsParser = new NFSExportsParser();
   constructor(
     public server: Server,
@@ -33,29 +34,38 @@ export class NFSManagerSingleServer implements INFSManager {
     this.exportsFile = new File(this.server, exportsFilePath);
   }
 
-  private ensureExportsFile(): ResultAsync<File, ProcessError> {
+  private ensureExportsFileWritable(): ResultAsync<File, ProcessError> {
     return this.exportsFile
-      .assertExists(true)
-      .orElse(() => this.exportsFile.create(true, this.commandOptions))
-      .andThen((file) => file.assertIsFile());
+      .assertExists(true, this.commandOptionsRead)
+      .orElse(() => this.exportsFile.create(true, this.commandOptionsWrite))
+      .andThen((file) => file.assertIsFile(this.commandOptionsRead));
+  }
+
+  private readExportsFileIfPresent(): ResultAsync<string, ProcessError> {
+    return this.exportsFile
+      .assertExists(true, this.commandOptionsRead)
+      .andThen((exportsFile) => exportsFile.read(this.commandOptionsRead))
+      .orElse(() => okAsync(""));
   }
 
   private setExports(exports: NFSExport[]): ResultAsync<this, ProcessError | ParsingError> {
     return this.nfsExportsParser
       .unapply(exports)
       .asyncAndThen((newExportsContent) =>
-        this.ensureExportsFile().andThen((exportsFile) =>
-          exportsFile.replace(newExportsContent, this.commandOptions)
+        this.ensureExportsFileWritable().andThen((exportsFile) =>
+          exportsFile.replace(newExportsContent, this.commandOptionsWrite)
         )
       )
-      .andThen(() => this.server.execute(new Command(["exportfs", "-ra"], this.commandOptions)))
+      .andThen(() => this.server.execute(new Command(["exportfs", "-ra"], this.commandOptionsWrite)))
       .map(() => this);
   }
 
   getExports(): ResultAsync<NFSExport[], ProcessError | ParsingError> {
-    return this.ensureExportsFile()
-      .andThen((exportsFile) => exportsFile.read(this.commandOptions))
-      .andThen((exportsFileContents) => this.nfsExportsParser.apply(exportsFileContents));
+    return this.readExportsFileIfPresent().andThen((exportsFileContents) =>
+      exportsFileContents.trim() === ""
+        ? okAsync([])
+        : this.nfsExportsParser.apply(exportsFileContents)
+    );
   }
 
   addExport(nfsExport: NFSExport): ResultAsync<NFSExport, ProcessError | ParsingError> {
@@ -80,13 +90,13 @@ export class NFSManagerSingleServer implements INFSManager {
   }
 
   exportConfig(): ResultAsync<string, ProcessError> {
-    return this.ensureExportsFile().andThen((exportsFile) => exportsFile.read(this.commandOptions));
+    return this.readExportsFileIfPresent();
   }
 
   importConfig(config: string): ResultAsync<this, ProcessError> {
-    return this.ensureExportsFile()
+    return this.ensureExportsFileWritable()
       .andThen((exportsFile) =>
-        exportsFile.replace(config, { ...this.commandOptions, backup: true })
+        exportsFile.replace(config, { ...this.commandOptionsWrite, backup: true })
       )
       .map(() => this);
   }

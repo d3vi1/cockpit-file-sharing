@@ -59,7 +59,15 @@ const { tempObject: tempOptions, modified, resetChanges} = useTempObjectStaging(
 
 const createFile = () => {
     return getServer()
-        .andThen((server) => server.execute(new BashCommand(`dd if=/dev/zero of=${props.filePath} bs=1 count=0 seek=${tempOptions.value.fileSize}`)))
+        .andThen((server) =>
+          server.execute(
+            new BashCommand(
+              `dd if=/dev/zero of=${props.filePath} bs=1 count=0 seek=${tempOptions.value.fileSize}`,
+              [],
+              { superuser: "try" }
+            )
+          )
+        )
         .map(() => {
             pushNotification(new Notification("Success", `Created file successfully.`, "success", 2000))
             emit('close');

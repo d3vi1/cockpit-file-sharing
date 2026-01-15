@@ -57,7 +57,10 @@ const moveConfigFileIfNeeded = async () => {
     .unwrapOr("notfound");
 
   if (checkOldConf === "exists" && checkNewConf === "notfound") {
-    await server.execute(new BashCommand(`mv "${OLD_CONF_PATH}" "${NEW_CONF_PATH}"`), false)
+    await server.execute(
+      new BashCommand(`mv "${OLD_CONF_PATH}" "${NEW_CONF_PATH}"`, [], { superuser: "try" }),
+      false
+    )
       .map(() => console.log(`Moved ${OLD_CONF_PATH} to ${NEW_CONF_PATH}`))
       .mapErr((err) => console.error(`Failed to move config file: ${err.message}`));
   }
