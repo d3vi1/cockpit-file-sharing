@@ -189,7 +189,15 @@ jobs:
           mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           PKG_NAME=$(jq -r '.name' manifest.json)
           PKG_VERSION=$(jq -r '.version' manifest.json)
-          git archive --format=tar.gz --prefix="${PKG_NAME}-${PKG_VERSION}/" -o "rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz" HEAD
+          tar -czf "rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz" \
+            --exclude=.git \
+            --exclude=./rpmbuild \
+            --exclude=./**/node_modules \
+            --exclude=./**/dist \
+            --exclude=./.yarn \
+            --exclude=./.yarnrc.yml \
+            --transform "s,^,${PKG_NAME}-${PKG_VERSION}/," \
+            .
           python3 - <<'PY'
           import json
           import os
