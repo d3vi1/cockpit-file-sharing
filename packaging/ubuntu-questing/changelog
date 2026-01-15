@@ -1,6 +1,7 @@
-cockpit-file-sharing (4.4.1-10questing) questing; urgency=medium
+cockpit-file-sharing (4.4.1-11questing) questing; urgency=medium
 
   * building package internal for repo
+  * forked from Jammy release
 
  -- Rachit Hans <rhans@45drives.com>  Wed, 24 Dec 2025 05:28:08 -0400
 
