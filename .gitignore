@@ -1,5 +1,8 @@
 TODO
 node_modules/
+package-lock.json
+npm-shrinkwrap.json
+pnpm-lock.yaml
 .yarn/
 .yarnrc.yml
 *_generic.tar.gz
