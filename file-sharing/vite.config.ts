@@ -23,6 +23,7 @@ export default defineConfig({
   build: {
     target: ["chrome87", "edge88", "firefox78", "safari14"],
     sourcemap: true,
+    chunkSizeWarningLimit: 1200,
   },
   define: {
     __APP_VERSION__: JSON.stringify(getAppVersionDefine()),
