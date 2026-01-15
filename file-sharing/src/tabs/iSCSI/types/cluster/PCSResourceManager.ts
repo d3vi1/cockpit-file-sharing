@@ -2,11 +2,18 @@ import { safeTry, okAsync, ok } from 'neverthrow';
 import { ResultAsync } from 'neverthrow';
 import { PCSResource, PCSResourceType, PCSResourceTypeInfo } from "@/tabs/iSCSI/types/cluster/PCSResource";
 import { PCSResourceGroup } from '@/tabs/iSCSI/types/cluster/PCSResourceGroup';
-import { BashCommand, ProcessError, safeJsonParse, type Server } from "@45drives/houston-common-lib";
+import {
+  BashCommand,
+  ProcessError,
+  safeJsonParse,
+  type Server,
+  type CommandOptions,
+} from "@45drives/houston-common-lib";
 
 export class PCSResourceManager {
 
     server: Server;
+    private commandOptionsWrite: CommandOptions = { superuser: "try" };
 
     currentResources: PCSResource[] | undefined;
 
@@ -18,7 +25,11 @@ export class PCSResourceManager {
 
     createResource(name: string, creationArguments: string, type: PCSResourceType, server: Server) {
         const resourceName = name.replace(':', '_');
-        const creationCommand = new BashCommand(`pcs resource create '${resourceName}' ${creationArguments}`);
+        const creationCommand = new BashCommand(
+          `pcs resource create '${resourceName}' ${creationArguments}`,
+          [],
+          this.commandOptionsWrite
+        );
         // console.log("creation command", creationCommand.toString());
         return server.execute(creationCommand).map(() => {
           const resource = new PCSResource(resourceName, type);
@@ -29,7 +40,9 @@ export class PCSResourceManager {
 
     deleteResource(resource: Pick<PCSResource, "name">) {
       // console.log(`pcs resource delete '${resource.name}'`);
-        return this.server.execute(new BashCommand(`pcs resource delete '${resource.name}'`))
+        return this.server.execute(
+          new BashCommand(`pcs resource delete '${resource.name}'`, [], this.commandOptionsWrite)
+        )
         .map(() => {
             this.currentResources = this.currentResources!.filter((existingResource) => existingResource.name !== resource.name);
             return undefined;
@@ -37,12 +50,16 @@ export class PCSResourceManager {
     }
 
     disableResource(resource: Pick<PCSResource, "name">) {
-        return this.server.execute(new BashCommand(`pcs resource disable '${resource.name}' `))
+        return this.server.execute(
+          new BashCommand(`pcs resource disable '${resource.name}' `, [], this.commandOptionsWrite)
+        )
         .map(() => undefined);
     }
 
     deleteResourceGroup(resourceGroup: Pick<PCSResourceGroup, "name">) {
-        return this.server.execute(new BashCommand(`pcs resource delete '${resourceGroup.name}'`))
+        return this.server.execute(
+          new BashCommand(`pcs resource delete '${resourceGroup.name}'`, [], this.commandOptionsWrite)
+        )
         .map(() => {
             this.currentResources = this.currentResources!.filter((existingResource) => existingResource.resourceGroup?.name !== resourceGroup.name);
             return undefined;
@@ -50,7 +67,9 @@ export class PCSResourceManager {
     }
 
     updateResource(resource: PCSResource, parameters: String) {
-        return this.server.execute(new BashCommand(`pcs resource update '${resource.name}' ${parameters}`))
+        return this.server.execute(
+          new BashCommand(`pcs resource update '${resource.name}' ${parameters}`, [], this.commandOptionsWrite)
+        )
         .map(() => undefined)
     }
 
@@ -223,39 +242,77 @@ export class PCSResourceManager {
 
             resource.resourceGroup = resourceGroup;
             // console.log(`pcs resource group add '${resourceGroup.name}' ${positionArgument.join(" ")} '${resource.name}'`);
-            return self.server.execute(new BashCommand(`pcs resource group add '${resourceGroup.name}' ${positionArgument.join(" ")} '${resource.name}'`)).map(() => undefined);
+            return self.server.execute(
+              new BashCommand(
+                `pcs resource group add '${resourceGroup.name}' ${positionArgument.join(" ")} '${resource.name}'`,
+                [],
+                self.commandOptionsWrite
+              )
+            ).map(() => undefined);
         }))
     }
 
     removeResourceFromGroup(resourceGroupName: string, resource: string) {
-        return this.server.execute(new BashCommand(`pcs resource ungroup ${resourceGroupName} '${resource}'`))
+        return this.server.execute(
+          new BashCommand(
+            `pcs resource ungroup ${resourceGroupName} '${resource}'`,
+            [],
+            this.commandOptionsWrite
+          )
+        )
         .map(() => undefined)
 
     }
 
     constrainResourceToGroup(resource: PCSResource, resourceGroup: PCSResourceGroup,server: Server) {
         // console.log(`pcs constraint colocation add '${resource.name}' with '${resourceGroup.name}'`);
-        return server.execute(new BashCommand(`pcs constraint colocation add '${resource.name}' with '${resourceGroup.name}'`))
+        return server.execute(
+          new BashCommand(
+            `pcs constraint colocation add '${resource.name}' with '${resourceGroup.name}'`,
+            [],
+            this.commandOptionsWrite
+          )
+        )
         .map(() => undefined)
     }
     unconstainResourceFromGroup(resourceName:string,resourceGroupName:string) {
-        return this.server.execute(new BashCommand(`pcs constraint remove colocation-RBD_${resourceName}-${resourceGroupName}-INFINITY`))
+        return this.server.execute(
+          new BashCommand(
+            `pcs constraint remove colocation-RBD_${resourceName}-${resourceGroupName}-INFINITY`,
+            [],
+            this.commandOptionsWrite
+          )
+        )
         .map(() => undefined);
     }
 
     enableResources(resourceName:string) {
         // console.log(`pcs resource enable ${resourceName}`);
-        return this.server.execute(new BashCommand(`pcs resource enable ${resourceName} `))
+        return this.server.execute(
+          new BashCommand(`pcs resource enable ${resourceName} `, [], this.commandOptionsWrite)
+        )
         .map(() => undefined);
     }
 
     orderResourceBeforeGroup(resource: PCSResource, resourceGroup: PCSResourceGroup) {
         // console.log(`pcs constraint order start '${resource.name}' then '${resourceGroup.name}'`);
-        return this.server.execute(new BashCommand(`pcs constraint order start '${resource.name}' then '${resourceGroup.name}'`))
+        return this.server.execute(
+          new BashCommand(
+            `pcs constraint order start '${resource.name}' then '${resourceGroup.name}'`,
+            [],
+            this.commandOptionsWrite
+          )
+        )
         .map(() => undefined);
     }
     removeResourcefromOrderGroup(resourceName:string,resourceGroupName:string) {
-        return this.server.execute(new BashCommand(`pcs constraint remove order-RBD_${resourceName}-${resourceGroupName}-mandatory`))
+        return this.server.execute(
+          new BashCommand(
+            `pcs constraint remove order-RBD_${resourceName}-${resourceGroupName}-mandatory`,
+            [],
+            this.commandOptionsWrite
+          )
+        )
         .map(() => undefined);
     }
 

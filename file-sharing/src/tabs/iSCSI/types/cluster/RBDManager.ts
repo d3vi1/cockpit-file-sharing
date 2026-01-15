@@ -4,13 +4,22 @@ import { PhysicalVolume } from './PhysicalVolume';
 import { LogicalVolume } from '@/tabs/iSCSI/types/cluster/LogicalVolume';
 import { RadosBlockDevice } from './RadosBlockDevice';
 import { Pool, PoolType } from "@/tabs/iSCSI/types/cluster/Pool";
-import { BashCommand, ProcessError, safeJsonParse, Server, StringToIntCaster } from '@45drives/houston-common-lib';
+import {
+  BashCommand,
+  ProcessError,
+  safeJsonParse,
+  Server,
+  StringToIntCaster,
+  type CommandOptions,
+} from '@45drives/houston-common-lib';
 import { err, errAsync, ok, okAsync, ResultAsync, safeTry } from 'neverthrow';
 
 export class RBDManager {
 
   server: Server;
   allServers: Server[] = []
+  private commandOptionsRead: CommandOptions = {};
+  private commandOptionsWrite: CommandOptions = { superuser: "try" };
     constructor(server: Server) {
         this.server = server;
     }
@@ -29,10 +38,10 @@ export class RBDManager {
     createRadosBlockDevice(name: string, size: number, parentPool: Pool, dataPool?: Pool) {
         const dataPoolArgument =  dataPool === undefined ? "" :  `--data-pool ${dataPool.name}`
 
-        return this.server.execute(new BashCommand(`rbd create ${parentPool.name}/${name} --size ${size}B ${dataPoolArgument}`))
+        return this.server.execute(new BashCommand(`rbd create ${parentPool.name}/${name} --size ${size}B ${dataPoolArgument}`, [], this.commandOptionsWrite))
         .andThen(() => 
-            this.server.execute(new BashCommand(`rbd map ${parentPool.name}/${name}`))
-            .andThen((mapProc) => this.server.execute(new BashCommand(`blockdev --getbsz ${mapProc.getStdout()}`))
+            this.server.execute(new BashCommand(`rbd map ${parentPool.name}/${name}`, [], this.commandOptionsWrite))
+            .andThen((mapProc) => this.server.execute(new BashCommand(`blockdev --getbsz ${mapProc.getStdout()}`, [], this.commandOptionsRead))
                 .andThen((blockSizeProc) => {
                     const blockSize = StringToIntCaster()(blockSizeProc.getStdout())
 
@@ -49,7 +58,7 @@ export class RBDManager {
     }
     getOnlineClusterNodes(): ResultAsync<Server[], ProcessError> {
       return this.server
-          .execute(new BashCommand(`pcs status xml`))
+          .execute(new BashCommand(`pcs status xml`, [], this.commandOptionsRead))
           .andThen((proc) => {
               const output = proc.getStdout();
               const parser = new DOMParser();
@@ -76,10 +85,10 @@ export class RBDManager {
     createLogicalVolumeFromRadosBlockDevices(logicalVolumeName: string, volumeGroupName: string, rbds: RadosBlockDevice[]) {
         const rbdPaths = rbds.map((rbd) => rbd.filePath).join(' ');
         let createdLogicalVolume: LogicalVolume | null = null;
-        return ResultAsync.combine(rbds.map((rbd) => this.server.execute(new BashCommand(`pvcreate ${rbd.filePath}`)).map(() => new PhysicalVolume(rbd))))
-        .andThen((physicalVolumes) => this.server.execute(new BashCommand(`vgcreate ${volumeGroupName} ${rbdPaths}`)).map(() => new VolumeGroup(volumeGroupName, physicalVolumes,this.server)))
-        .andThen((volumeGroup) => this.server.execute(new BashCommand(`lvcreate -i ${rbds.length} -I 64 -l 100%FREE -n ${logicalVolumeName} ${volumeGroupName} ${rbdPaths}`))
-            .andThen(() => this.server.execute(new BashCommand(`lvdisplay /dev/${volumeGroupName}/${logicalVolumeName} --units B | grep 'LV Size' | awk '{print $3, $4}'`))
+        return ResultAsync.combine(rbds.map((rbd) => this.server.execute(new BashCommand(`pvcreate ${rbd.filePath}`, [], this.commandOptionsWrite)).map(() => new PhysicalVolume(rbd))))
+        .andThen((physicalVolumes) => this.server.execute(new BashCommand(`vgcreate ${volumeGroupName} ${rbdPaths}`, [], this.commandOptionsWrite)).map(() => new VolumeGroup(volumeGroupName, physicalVolumes,this.server)))
+        .andThen((volumeGroup) => this.server.execute(new BashCommand(`lvcreate -i ${rbds.length} -I 64 -l 100%FREE -n ${logicalVolumeName} ${volumeGroupName} ${rbdPaths}`, [], this.commandOptionsWrite))
+            .andThen(() => this.server.execute(new BashCommand(`lvdisplay /dev/${volumeGroupName}/${logicalVolumeName} --units B | grep 'LV Size' | awk '{print $3, $4}'`, [], this.commandOptionsRead))
                 .map((proc) => proc.getStdout())
                 .map((maximumSize) => {
                   
@@ -99,7 +108,7 @@ export class RBDManager {
     }
 
     expandRadosBlockDevice(device: RadosBlockDevice, newSizeBytes: number) {
-        return this.server.execute(new BashCommand(`rbd resize --size ${newSizeBytes}B ${device.deviceName}`));
+        return this.server.execute(new BashCommand(`rbd resize --size ${newSizeBytes}B ${device.deviceName}`, [], this.commandOptionsWrite));
     }
 
     expandLogicalVolume(volume: LogicalVolume, newSizeBytes: number) {
@@ -107,13 +116,13 @@ export class RBDManager {
 
         return ResultAsync.combine(volume.volumeGroup.volumes.map((volume) => 
             this.expandRadosBlockDevice(volume.rbd, newSizePerRBD)
-            .andThen(() => this.server.execute(new BashCommand(`pvresize ${volume.rbd.filePath}`)))
+            .andThen(() => this.server.execute(new BashCommand(`pvresize ${volume.rbd.filePath}`, [], this.commandOptionsWrite)))
         ))
-        .andThen(() => this.server.execute(new BashCommand(`lvextend -l +100%FREE ${volume.filePath}`)));
+        .andThen(() => this.server.execute(new BashCommand(`lvextend -l +100%FREE ${volume.filePath}`, [], this.commandOptionsWrite)));
     }
 
     fetchAvaliablePools(server: Server = this.server): ResultAsync<Pool[], ProcessError> {
-        return server.execute(new BashCommand(`ceph osd pool ls detail --format json`))
+        return server.execute(new BashCommand(`ceph osd pool ls detail --format json`, [], this.commandOptionsRead))
             .map((proc) => proc.getStdout())
             .andThen(safeJsonParse<PoolInfoJson>)
             .map((allPoolInfo) => allPoolInfo.filter((poolInfo) => poolInfo !== undefined))
@@ -154,12 +163,12 @@ export class RBDManager {
         this.allServers.map((server) => {
     
           return ResultAsync.combine([
-            server.execute(new BashCommand(`rbd showmapped --format json`))
+            server.execute(new BashCommand(`rbd showmapped --format json`, [], this.commandOptionsRead))
               .map((proc) => proc.getStdout())
               .andThen(safeJsonParse<MappedRBDJson>)
               .mapErr((err) => new ProcessError(`Unable to get mapped RBDs from ${server}: ${err}`)),
               
-            server.execute(new BashCommand(`pvs --reportformat json -o pv_name,vg_name`))
+            server.execute(new BashCommand(`pvs --reportformat json -o pv_name,vg_name`, [], this.commandOptionsRead))
               .map((proc) => proc.getStdout())
               .andThen(safeJsonParse<PVToVGJson>)
               .map((parsed) => {
@@ -218,7 +227,7 @@ export class RBDManager {
             `lvs --reportformat json --units B \
              -o lv_name,vg_name,lv_size,lv_path,lv_attr \
              -S 'vg_name!="rl" && lv_name!~"^(root|home|swap)$"'`
-          ))
+          , [], this.commandOptionsRead))
             .map(p => {
               const out = p.getStdout()
               // console.log("LVS raw stdout: ", out);
@@ -233,7 +242,7 @@ export class RBDManager {
             .andThen(lvList =>
               ResultAsync.combine([
                 okAsync(lvList),
-                server.execute(new BashCommand(`pvs --reportformat json --units B -o pv_name,vg_name`))
+                server.execute(new BashCommand(`pvs --reportformat json --units B -o pv_name,vg_name`, [], this.commandOptionsRead))
                   .map(p => {
                     const out = p.getStdout()
                     // console.log("pvs raw stdout: ", out);
@@ -299,19 +308,19 @@ export class RBDManager {
     }
     
     fetchExistingImageNames() {
-        return this.server.execute(new BashCommand(`rbd list`))
+        return this.server.execute(new BashCommand(`rbd list`, [], this.commandOptionsRead))
         .map((proc) => proc.getStdout())
         .map((output) => output.trim().split('\n'));
     }
 
     getBlockSizeFromDevicePath(path: Pick<VirtualDevice, "filePath"> | string, server: Server) {
-        return server.execute(new BashCommand(`blockdev --getbsz ${path}`))
+        return server.execute(new BashCommand(`blockdev --getbsz ${path}`, [], this.commandOptionsRead))
                     .map((proc) => StringToIntCaster()(proc.getStdout()))
                     .andThen((maybeNumber) => maybeNumber.isSome() ? okAsync(maybeNumber.some()) : errAsync(new ProcessError(`Unable to determine block size for device: ${path}`)))
     }
 
     getMaximumSizeFromRBDName(rbdName: Pick<VirtualDevice, "deviceName"> | string,parentPool: Pool, server: Server) {
-        return server.execute(new BashCommand(`rbd info ${parentPool.name}/${rbdName} --format json`))
+        return server.execute(new BashCommand(`rbd info ${parentPool.name}/${rbdName} --format json`, [], this.commandOptionsRead))
                     .map((proc) => proc.getStdout())
                     .andThen(safeJsonParse<RBDInfoJson>)
                     .map((rbdInfoEntry) => StringToIntCaster()(rbdInfoEntry.size!))
@@ -320,7 +329,7 @@ export class RBDManager {
     }
 
     getDataPoolForRBDName(rbdName: Pick<VirtualDevice, "deviceName"> | string, parentPool: Pool, server: Server) {
-        return server.execute(new BashCommand(`rbd info ${parentPool.name}/${rbdName}`))
+        return server.execute(new BashCommand(`rbd info ${parentPool.name}/${rbdName}`, [], this.commandOptionsRead))
                     .map((proc) => proc.getStdout())
                     .andThen(safeJsonParse<RBDInfoJson>)
                     .map((rbdInfoEntry) => {

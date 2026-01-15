@@ -11,7 +11,7 @@ import { ResultAsync, okAsync } from "neverthrow";
 export const useMountpointInfo = (
   path: Ref<string>,
   server: Server | ResultAsync<Server, unknown>,
-  commandOptions: CommandOptions = { superuser: "try" }
+  commandOptions: CommandOptions = {}
 ) => {
   if (server instanceof Server) {
     server = okAsync(server);

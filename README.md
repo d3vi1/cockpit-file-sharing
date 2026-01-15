@@ -26,6 +26,21 @@ User and group management was removed from cockpit-file-sharing in favour of man
 - Manage individual client settings
 - Export and import of configuration (same format as `/etc/exports`)
 
+# Security & Authorization
+cockpit-file-sharing separates read-only operations from mutating/admin actions. Reads are executed
+without elevation when possible. Mutating operations use Cockpit's `superuser: "try"` path so
+polkit can enforce authorization.
+
+Mutating actions that require authorization include:
+- Samba: add/edit/remove shares, change global settings, update registry-backed config, set SMB passwords
+- NFS: update exports, import config, run `exportfs -ra`
+- iSCSI: SCST config import/apply, SCST sysfs writes, cluster PCS resource changes, RBD/LVM provisioning
+- Ceph options: set/remove xattrs, create or remove remount units
+- systemd: create/remove units, enable/disable/start/stop, daemon-reload
+
+Read-only access (listing shares, exports, sessions, status, and configuration snapshots) stays
+unprivileged unless the underlying files or commands are restricted by the OS.
+
 # Installation
 ## Ubuntu 20.04
 ### From 45Drives Repo (Recommended, Ubuntu 20.04 only)

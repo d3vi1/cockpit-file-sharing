@@ -38,18 +38,20 @@ const CEPH_DIR_LAYOUT_POOL_ATTRIBUTE_NAME = CEPH_DIR_LAYOUT_ATTRIBUTE_NAME + ".p
 
 export class CephOptionManagerSingleServer implements ICephOptionManager {
   private systemdManager: SystemdManagerSingleServer;
-  private commandOptions: CommandOptions;
+  private commandOptionsRead: CommandOptions;
+  private commandOptionsWrite: CommandOptions;
   private stringToIntCaster = StringToIntCaster(10);
   constructor(
     private server: Server,
     private clientName: `client.${string}`
   ) {
     this.systemdManager = new SystemdManagerSingleServer(this.server, "system");
-    this.commandOptions = { superuser: "try" };
+    this.commandOptionsRead = {};
+    this.commandOptionsWrite = { superuser: "try" };
   }
 
-  private getResolvedNode(path: string) {
-    return new FileSystemNode(this.server, path).resolve(true);
+  private getResolvedNode(path: string, commandOptions: CommandOptions = this.commandOptionsRead) {
+    return new FileSystemNode(this.server, path).resolve(true, commandOptions);
   }
 
   private getMountUnit(pathNode: FileSystemNode) {
@@ -57,13 +59,15 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
   }
 
   pathIsMountpoint(path: string) {
-    return this.getResolvedNode(path)
-      .andThen((node) => node.getFilesystemMount().map((mount) => ({ node, mount })))
+    return this.getResolvedNode(path, this.commandOptionsRead)
+      .andThen((node) =>
+        node.getFilesystemMount(this.commandOptionsRead).map((mount) => ({ node, mount }))
+      )
       .map(({ node, mount }) => node.path === mount.mountpoint);
   }
 
   pathMountpointManagedByFileSharing(path: string) {
-    return this.getResolvedNode(path)
+    return this.getResolvedNode(path, this.commandOptionsRead)
       .andThen((node) => this.getMountUnit(node))
       .andThen((unit) => this.systemdManager.getSettings(unit))
       .map((mountSettings) => mountSettings.Unit?.Description === SYSTEMD_MOUNT_DESCRIPTION);
@@ -77,14 +81,14 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
 
   private createRemount(pathNode: FileSystemNode) {
     const ancestorMountpoint = pathNode
-      .getFilesystemMount()
+      .getFilesystemMount(this.commandOptionsRead)
       .andThen(({ filesystem: { type }, mountpoint }) =>
         type !== "ceph"
           ? err(new ProcessError(`Not a ceph filesystem: ${mountpoint}`))
           : ok(mountpoint)
       );
     const ancestorMountSettings = ancestorMountpoint
-      .andThen((ancestorMountpoint) => this.getResolvedNode(ancestorMountpoint))
+      .andThen((ancestorMountpoint) => this.getResolvedNode(ancestorMountpoint, this.commandOptionsRead))
       .andThen((ancestorNode) => this.getMountUnit(ancestorNode))
       .andThen((ancestorMountUnit) => this.systemdManager.getSettings(ancestorMountUnit));
     const newMountpointSource = ancestorMountSettings.andThen((ancestorMountSettings) => {
@@ -144,7 +148,7 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
   }
 
   remountPath(path: string): ResultAsync<this, ProcessError | ParsingError> {
-    return this.getResolvedNode(path)
+    return this.getResolvedNode(path, this.commandOptionsRead)
       .andThen((pathNode) =>
         this.pathMountpointManagedByFileSharing(path)
           .andThen((managedbyFileSharing) =>
@@ -158,7 +162,7 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
   }
 
   removeRemount(path: string): ResultAsync<this, ProcessError | ParsingError> {
-    return this.getResolvedNode(path)
+    return this.getResolvedNode(path, this.commandOptionsRead)
       .andThen((node) => this.getMountUnit(node))
       .andThen((unit) => this.systemdManager.disable(unit, "now"))
       .andThen((unit) => this.systemdManager.removeUnit(unit))
@@ -167,7 +171,7 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
 
   getQuotaMaxBytes(path: string): ResultAsync<Maybe<number>, ProcessError | ParsingError> {
     return new FileSystemNode(this.server, path)
-      .getExtendedAttribute(CEPH_QUOTA_MAX_BYTES_ATTRIBUTE_NAME, this.commandOptions)
+      .getExtendedAttribute(CEPH_QUOTA_MAX_BYTES_ATTRIBUTE_NAME, this.commandOptionsRead)
       .map((attr) => attr.flatMap(this.stringToIntCaster));
   }
 
@@ -179,14 +183,14 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
       .setExtendedAttribute(
         CEPH_QUOTA_MAX_BYTES_ATTRIBUTE_NAME,
         quotaMaxBytes.toString(10),
-        this.commandOptions
+        this.commandOptionsWrite
       )
       .map(() => this);
   }
 
   removeQuotaMaxBytes(path: string): ResultAsync<this, ProcessError | ParsingError> {
     return new FileSystemNode(this.server, path)
-      .setExtendedAttribute(CEPH_QUOTA_MAX_BYTES_ATTRIBUTE_NAME, "0", this.commandOptions)
+      .setExtendedAttribute(CEPH_QUOTA_MAX_BYTES_ATTRIBUTE_NAME, "0", this.commandOptionsWrite)
       .map(() => this);
   }
 
@@ -203,13 +207,13 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
             this.clientName,
             "--format=json",
           ],
-          this.commandOptions
+          this.commandOptionsRead
         )
       )
       .orElse(() =>
         // fall back to default keyring
         this.server.execute(
-          new Command(["ceph", "fs", "status", "--format=json"], this.commandOptions)
+          new Command(["ceph", "fs", "status", "--format=json"], this.commandOptionsRead)
         )
       )
       .map((proc) => proc.getStdout())
@@ -226,19 +230,19 @@ export class CephOptionManagerSingleServer implements ICephOptionManager {
   getLayoutPool(path: string): ResultAsync<Maybe<string>, ProcessError | ParsingError> {
     return new FileSystemNode(this.server, path).getExtendedAttribute(
       CEPH_DIR_LAYOUT_POOL_ATTRIBUTE_NAME,
-      this.commandOptions
+      this.commandOptionsRead
     );
   }
 
   setLayoutPool(path: string, layoutPool: string): ResultAsync<this, ProcessError | ParsingError> {
     return new FileSystemNode(this.server, path)
-      .setExtendedAttribute(CEPH_DIR_LAYOUT_POOL_ATTRIBUTE_NAME, layoutPool, this.commandOptions)
+      .setExtendedAttribute(CEPH_DIR_LAYOUT_POOL_ATTRIBUTE_NAME, layoutPool, this.commandOptionsWrite)
       .map(() => this);
   }
 
   removeLayoutPool(path: string): ResultAsync<this, ProcessError | ParsingError> {
     return new FileSystemNode(this.server, path)
-      .removeExtendedAttribute(CEPH_DIR_LAYOUT_ATTRIBUTE_NAME, this.commandOptions)
+      .removeExtendedAttribute(CEPH_DIR_LAYOUT_ATTRIBUTE_NAME, this.commandOptionsWrite)
       .map(() => this);
   }
 }
