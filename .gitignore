@@ -1,5 +1,6 @@
 TODO
 node_modules/
+AGENTS.md
 package-lock.json
 npm-shrinkwrap.json
 pnpm-lock.yaml
